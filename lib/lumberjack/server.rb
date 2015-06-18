@@ -23,7 +23,8 @@ module Lumberjack
         :address => "0.0.0.0",
         :ssl_certificate => nil,
         :ssl_key => nil,
-        :ssl_key_passphrase => nil
+        :ssl_key_passphrase => nil,
+        :ssl_cert_chain => nil
       }.merge(options)
 
       [:ssl_certificate, :ssl_key].each do |k|
@@ -41,8 +42,45 @@ module Lumberjack
       @ssl.cert = OpenSSL::X509::Certificate.new(File.read(@options[:ssl_certificate]))
       @ssl.key = OpenSSL::PKey::RSA.new(File.read(@options[:ssl_key]),
                                         @options[:ssl_key_passphrase])
+      if @options[:ssl_cert_chain] != nil
+        @ssl.extra_chain_cert = cert_chain(File.read(@options[:ssl_cert_chain]))
+      end
       @ssl_server = OpenSSL::SSL::SSLServer.new(@tcp_server, @ssl)
     end # def initialize
+
+
+    ## Borrowed from packettheif/uti.rb:
+    ## https://github.com/iSECPartners/tlspretense/blob/master/lib/packetthief/util.rb
+    # Extracts all PEM encoded certs from a raw string and returns a list of
+    # X509 certificate objects in the order they appear in the file.
+    #
+    # This can be helpful for loading a chain of certificates, eg for a
+    # server.
+    #
+    # Usage:
+    #
+    #   chain = cert_chain(File.read("chain.pem"))
+    #   p chain # => [#<OpenSSL::X509::Certificate subject=/C=US/CN=my.hostname.com, issuer=/C=US/CN=Trusted CA...>,
+    #                   #<OpenSSL::X509::Certificate subject=/C=US/CN=Trusted CA ... >]
+    def cert_chain(raw)
+      rawchain = split_chain(raw)
+      rawchain.map { |rawcert| OpenSSL::X509::Certificate.new(rawcert) }
+    end
+
+    ## Continuing borrowing from packetthief/util.rb 
+    ## https://github.com/iSECPartners/tlspretense/blob/master/lib/packetthief/util.rb
+    # Extracts all PEM encoded certificates out of a raw string and returns
+    # each raw PEM encoded certificate in an array.
+    def split_chain(raw)
+      chain = []
+      remaining = raw
+      certpat = /-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----/m
+      while m = certpat.match(remaining)
+        remaining = m.post_match
+        chain << m[0].strip
+      end
+      chain
+    end
 
     def run(&block)
       while true
