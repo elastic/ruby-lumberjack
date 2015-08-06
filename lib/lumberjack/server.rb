@@ -227,15 +227,18 @@ module Lumberjack
         @parser.feed(@fd.sysread(16384)) do |event, *args|
           case event
           when :window_size; window_size(*args, &block)
-          when :data; data(*args, &block)
+          when :data
+            data(*args, &block)
           end
           #send(event, *args)
         end # feed
       end # while true
     rescue EOFError, OpenSSL::SSL::SSLError, IOError, Errno::ECONNRESET
+
       # EOF or other read errors, only action is to shutdown which we'll do in
       # 'ensure'
     ensure
+      File.open("/tmp/event-raised-exception.log", "a") { |file| file.write("th #{Thread.current.object_id} -> I've closed the connection.\n") }
       close rescue 'Already closed stream'
     end # def run
 
@@ -244,15 +247,22 @@ module Lumberjack
     end
 
     def window_size(size)
+      File.open("/tmp/event-raised-exception.log", "a+") { |file| file.write("th #{Thread.current.object_id}, windows size change: #{size}\n") }
       @window_size = size
     end
 
     def data(sequence, map, &block)
+      duplicate = map.dup
       block.call(map) if block_given?
       if (sequence - @last_ack) >= @window_size
-        @fd.syswrite(["1A", sequence].pack("A*N"))
-        @last_ack = sequence
+        ack(sequence)
+        File.open("/tmp/event-raised-exception.log", "a+") { |file| file.write("th #{Thread.current.object_id}, ack sequence #{sequence} event: #{duplicate}\n") }
       end
+    end
+
+    def ack(sequence)
+      @fd.syswrite(["1A", sequence].pack("A*N"))
+      @last_ack = sequence
     end
   end # class Connection
 
