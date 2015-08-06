@@ -247,20 +247,29 @@ module Lumberjack
     end
 
     def window_size(size)
+      @next_ack = nil
       File.open("/tmp/event-raised-exception.log", "a+") { |file| file.write("th #{Thread.current.object_id}, windows size change: #{size}\n") }
       @window_size = size
     end
 
     def data(sequence, map, &block)
+      if @next_ack == nil
+        @next_ack = compute_next_ack(sequence)
+      end
       duplicate = map.dup
       block.call(map) if block_given?
-      if (sequence - @last_ack) >= @window_size
+      if sequence > @next_ack
         ack(sequence)
         File.open("/tmp/event-raised-exception.log", "a+") { |file| file.write("th #{Thread.current.object_id}, ack sequence #{sequence} event: #{duplicate}\n") }
       end
     end
+    
+    def compute_next_ack(sequence)
+      sequence + @window_size - 1
+    end
 
     def ack(sequence)
+      @next_ack = compute_next_ack(sequence)
       @fd.syswrite(["1A", sequence].pack("A*N"))
       @last_ack = sequence
     end
