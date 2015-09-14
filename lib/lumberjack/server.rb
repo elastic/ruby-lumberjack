@@ -4,6 +4,7 @@ require "socket"
 require "thread"
 require "openssl"
 require "zlib"
+require "concurrent"
 
 module Lumberjack
   class Server
@@ -38,6 +39,8 @@ module Lumberjack
 
       tcp_server = TCPServer.new(@options[:address], @options[:port])
 
+      @close = Concurrent::AtomicBoolean.new
+
       # Query the port in case the port number is '0'
       # TCPServer#addr == [ address_family, port, address, address ]
       @port = tcp_server.addr[1]
@@ -57,7 +60,7 @@ module Lumberjack
     end # def initialize
 
     def run(&block)
-      while true
+      while !closed?
         connection = accept
         Thread.new(connection) do |connection|
           connection.run(&block)
@@ -74,10 +77,19 @@ module Lumberjack
         retry
       end
       if block_given?
-        block.call(fd)
+        block.call(fd, self)
       else
-        Connection.new(fd)
+        Connection.new(fd, self)
       end
+    end
+
+    def closed?
+      @close.value
+    end
+
+    def close
+      @close.make_true
+      @server.close unless @server.closed?
     end
   end # class Server
 
@@ -221,17 +233,19 @@ module Lumberjack
   class Connection
     READ_SIZE = 16384
 
-    def initialize(fd)
-      super()
+    attr_accessor :server
+
+    def initialize(fd, server)
       @parser = Parser.new
       @fd = fd
 
+      @server = server
       # a safe default until we are told by the client what window size to use
       @window_size = 1 
     end
 
     def run(&block)
-      while true
+      while !server.closed?
         read_socket(&block)
       end
     rescue EOFError, OpenSSL::SSL::SSLError, IOError, Errno::ECONNRESET
@@ -260,7 +274,7 @@ module Lumberjack
     end
 
     def close
-      @fd.close
+      @fd.close unless @fd.closed?
     end
 
     def window_size(size)

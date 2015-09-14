@@ -32,7 +32,7 @@ describe "A client" do
     @tcp_server = Thread.new do
       while true
         tcp_server.accept do |socket|
-          con = Lumberjack::Connection.new(socket)
+          con = Lumberjack::Connection.new(socket, tcp_server)
           begin
             con.run { |data| queue << data }
           rescue
