@@ -34,7 +34,7 @@ describe "A client" do
         tcp_server.accept do |socket|
           con = Lumberjack::Connection.new(socket)
           begin
-            con.run { |data| queue << data }
+            con.run { |_, data| queue << data }
           rescue
             # Close connection on failure. For example SSL client will make
             # parser for TCP based server trip.
@@ -45,7 +45,7 @@ describe "A client" do
     end
 
     @ssl_server = Thread.new do
-      ssl_server.run { |data| queue << data }
+      ssl_server.run { |_, data| queue << data }
     end
   end
 
