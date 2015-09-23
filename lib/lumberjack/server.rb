@@ -10,8 +10,6 @@ module Lumberjack
   class Server
     attr_reader :port
 
-    @@json = JSON.method(:parse)
-
     # Create a new Lumberjack server.
     #
     # - options is a hash. Valid options are:
@@ -58,16 +56,6 @@ module Lumberjack
       end
 
     end # def initialize
-
-    public
-    def self.json
-      return @@json
-    end
-
-    public
-    def self.json=(json)
-      @@json = json
-    end
 
     def run(&block)
       while true
@@ -190,7 +178,7 @@ module Lumberjack
 
     def json_data_payload(&block)
       payload = get
-      yield :json, @sequence, Lumberjack::Server.json.call(payload)
+      yield :json, @sequence, Lumberjack::json.load(payload)
     end
 
     def data_lead(&block)
