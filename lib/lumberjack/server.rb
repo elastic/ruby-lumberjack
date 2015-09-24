@@ -72,17 +72,23 @@ module Lumberjack
     end
 
     def accept(&block)
+      socket = accept_tcp
+
+      if block_given?
+        socket = accept_ssl(socket) if ssl?
+        block.call(socket)
+      else
+        # Do the SSL handshake later
+        socket = SocketLazySSLHandshake.new(socket, self) if ssl?
+
+        Connection.new(socket, self)
+      end
+    end
+
+    def accept_tcp
       begin
        socket = @server.accept_nonblock
-        # update the socket with a SSL layer
-        socket = accept_ssl(socket) if ssl?
-
-        if block_given?
-          block.call(socket, self)
-        else
-          return Connection.new(socket, self)
-        end
-      rescue OpenSSL::SSL::SSLError, IOError, EOFError
+      rescue IOError, EOFError
         # close the current socket, make plain text connection stop.
         # but lets keep listening for new ones.
         socket.close
@@ -103,7 +109,6 @@ module Lumberjack
 
       begin
         ssl_socket.accept_nonblock
-
         return ssl_socket
       rescue IO::WaitReadable #handshake
         IO.select([ssl_socket], nil, nil, SOCKET_TIMEOUT)
@@ -123,6 +128,31 @@ module Lumberjack
       @server.close unless @server.closed?
     end
   end # class Server
+
+  # Wait until we read from the socket to do the actual
+  # handshake, this allow the handshake to be done in the caller thread 
+  # and not blocking the main acceptor thread.
+  #
+  # Doing so, should not interfere in the error handling since in all scenarios we
+  # just bail out and close the socket.
+  #
+  # Using this decorator allow us to keep the same api for the library
+  # -- ph
+  class SocketLazySSLHandshake < SimpleDelegator
+    def initialize(socket, server)
+      super(socket)
+      @server = server
+    end
+
+    def sysread(*args)
+      unless @handshaked
+        socket = @server.accept_ssl(__getobj__)
+        __setobj__(socket)
+        @handshaked = true
+      end
+      __getobj__.sysread(*args)
+    end
+  end
 
   class Parser
     def initialize
@@ -244,7 +274,6 @@ module Lumberjack
         yield :data, @sequence, @data
         transition(:header, 2)
       end
-
     end # def data_field_value
 
     def compressed_lead(&block)
