@@ -154,7 +154,7 @@ describe "A client" do
         }.not_to raise_error
       end
 
-      xit "should fail connecting to plain tcp server" do
+      it "should fail connecting to plain tcp server" do
         expect { 
           Lumberjack::Client.new(:port => tcp_port,
                                  :host => host,

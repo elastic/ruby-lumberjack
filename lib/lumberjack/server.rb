@@ -73,21 +73,43 @@ module Lumberjack
 
     def accept(&block)
       begin
-        fd = @server.accept_nonblock
-
-        if ssl?
-          fd = OpenSSL::SSL::SSLSocket.new(fd, @ssl)
-          fd.accept
-        end
+       socket = @server.accept_nonblock
+        # update the socket with a SSL layer
+        socket = accept_ssl(socket) if ssl?
 
         if block_given?
-          block.call(fd, self)
+          block.call(socket, self)
         else
-          return Connection.new(fd, self)
+          return Connection.new(socket, self)
         end
+      rescue OpenSSL::SSL::SSLError, IOError, EOFError
+        # close the current socket, make plain text connection stop.
+        # but lets keep listening for new ones.
+        socket.close
+        retry
+      rescue IO::WaitReadable, Errno::EAGAIN # Ressource not ready yet, so lets try again
+        begin
+          IO.select([@server], nil, nil, SOCKET_TIMEOUT)
+          retry unless closed?
+        rescue IOError => e # we currently closing
+          raise e unless closed?
+        end
+      end
+    end
 
-      rescue IO::WaitReadable, Errno::EINTR, Errno::EAGAIN, EOFError, OpenSSL::SSL::SSLError, IOError 
-        IO.select([@server], nil, nil, SOCKET_TIMEOUT)
+    def accept_ssl(tcp_socket)
+      ssl_socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, @ssl)
+      ssl_socket.sync_close
+
+      begin
+        ssl_socket.accept_nonblock
+
+        return ssl_socket
+      rescue IO::WaitReadable #handshake
+        IO.select([ssl_socket], nil, nil, SOCKET_TIMEOUT)
+        retry unless closed?
+      rescue IO::WaitWritable # handshake
+        IO.select(nil, [ssl_socket], nil, SOCKET_TIMEOUT)
         retry unless closed?
       end
     end
