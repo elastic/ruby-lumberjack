@@ -8,6 +8,8 @@ require "concurrent"
 
 module Lumberjack
   class Server
+    SOCKET_TIMEOUT = 1
+
     attr_reader :port
 
     # Create a new Lumberjack server.
@@ -37,49 +39,56 @@ module Lumberjack
         end
       end
 
-      tcp_server = TCPServer.new(@options[:address], @options[:port])
+      @server = TCPServer.new(@options[:address], @options[:port])
 
       @close = Concurrent::AtomicBoolean.new
 
       # Query the port in case the port number is '0'
       # TCPServer#addr == [ address_family, port, address, address ]
-      @port = tcp_server.addr[1]
+      @port = @server.addr[1]
 
-      if !@options[:ssl]
-        @server = tcp_server
-      else
+      if @options[:ssl]
         # load SSL certificate
-        ssl = OpenSSL::SSL::SSLContext.new
-        ssl.cert = OpenSSL::X509::Certificate.new(File.read(@options[:ssl_certificate]))
-        ssl.key = OpenSSL::PKey::RSA.new(File.read(@options[:ssl_key]),
+        @ssl = OpenSSL::SSL::SSLContext.new
+        @ssl.timeout = SOCKET_TIMEOUT
+        @ssl.cert = OpenSSL::X509::Certificate.new(File.read(@options[:ssl_certificate]))
+        @ssl.key = OpenSSL::PKey::RSA.new(File.read(@options[:ssl_key]),
           @options[:ssl_key_passphrase])
-
-        @server = OpenSSL::SSL::SSLServer.new(tcp_server, ssl)
       end
-
     end # def initialize
 
     def run(&block)
       while !closed?
         connection = accept
+
         Thread.new(connection) do |connection|
           connection.run(&block)
         end
       end
     end # def run
 
+    def ssl?
+      @ssl
+    end
+
     def accept(&block)
       begin
-        fd = @server.accept
-      rescue EOFError, OpenSSL::SSL::SSLError, IOError
-        # ssl handshake or other accept-related failure.
-        # TODO(sissel): Make it possible to log this.
-        retry
-      end
-      if block_given?
-        block.call(fd, self)
-      else
-        Connection.new(fd, self)
+        fd = @server.accept_nonblock
+
+        if ssl?
+          fd = OpenSSL::SSL::SSLSocket.new(fd, @ssl)
+          fd.accept
+        end
+
+        if block_given?
+          block.call(fd, self)
+        else
+          return Connection.new(fd, self)
+        end
+
+      rescue IO::WaitReadable, Errno::EINTR, Errno::EAGAIN, EOFError, OpenSSL::SSL::SSLError, IOError 
+        IO.select([@server], nil, nil, SOCKET_TIMEOUT)
+        retry unless closed?
       end
     end
 
