@@ -61,6 +61,8 @@ module Lumberjack
       while !closed?
         connection = accept
 
+        # TODO(ph) implement a thread pool
+        # and revise the close logic
         Thread.new(connection) do |connection|
           connection.run(&block)
         end
@@ -75,12 +77,14 @@ module Lumberjack
       socket = accept_tcp
 
       if block_given?
+        # we only return the socket so
+        # we complete the ssl handshake
         socket = accept_ssl(socket) if ssl?
         block.call(socket)
       else
         # Do the SSL handshake later
+        # on first sysread
         socket = SocketLazySSLHandshake.new(socket, self) if ssl?
-
         Connection.new(socket, self)
       end
     end
@@ -88,18 +92,16 @@ module Lumberjack
     def accept_tcp
       begin
        socket = @server.accept_nonblock
-      rescue IOError, EOFError
-        # close the current socket, make plain text connection stop.
-        # but lets keep listening for new ones.
-        socket.close
-        retry
-      rescue IO::WaitReadable, Errno::EAGAIN # Ressource not ready yet, so lets try again
+      rescue IO::WaitReadable, Errno::EAGAIN,
+        IOError, EOFError, SocketError # Ressource not ready yet, so lets try again
+
         begin
           IO.select([@server], nil, nil, SOCKET_TIMEOUT)
           retry unless closed?
-        rescue IOError => e # we currently closing
+        rescue IOError => e # we currently closing and the socket is marked as closing
           raise e unless closed?
         end
+      rescue Errno::EBADF # Socket is already close.
       end
     end
 
