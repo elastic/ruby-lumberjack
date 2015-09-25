@@ -95,9 +95,10 @@ module Lumberjack
     def accept_tcp
       begin
        socket = @server.accept_nonblock
-      rescue IO::WaitReadable, Errno::EAGAIN,
-        IOError, EOFError, SocketError # Ressource not ready yet, so lets try again
-
+      rescue  IOError, EOFError, SocketError # Ressource not ready yet, so lets try again
+        socket.close rescue nil?
+        retry unless closed?
+      rescue IO::WaitReadable, Errno::EAGAIN
         begin
           IO.select([@server], nil, nil, SOCKET_TIMEOUT)
           retry unless closed?
