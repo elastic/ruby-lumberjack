@@ -18,4 +18,5 @@ Gem::Specification.new do |gem|
   gem.add_development_dependency "rspec"
   gem.add_development_dependency "stud"
   gem.add_development_dependency "pry"
+  gem.add_development_dependency "rspec-wait"
 end

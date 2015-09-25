@@ -1,47 +1,42 @@
 # encoding: utf-8
+require "lumberjack/client"
 require "lumberjack/server"
-require "spec_helper"
 require "flores/random"
+require "flores/pki"
+require "spec_helper"
+
+Thread.abort_on_exception = true
 
 describe "Server" do
-  let(:server) { double("server", :closed? => false) }
-  let(:socket) { double("socket", :closed? => false) }
-  let(:connection) { Lumberjack::Connection.new(socket, server) }
-  let(:payload) { {"line" => "foobar" } }
-  let(:start_sequence) { Flores::Random.integer(0..2000) }
-  let(:random_number_of_events) { Flores::Random.integer(2..200) }
+  let(:certificate) { Flores::PKI.generate }
+  let(:certificate_file_crt) { "certificate.crt" }
+  let(:certificate_file_key) { "certificate.key" }
+  let(:port) { Flores::Random.integer(1024..65335) }
+  let(:tcp_port) { port + 1 }
+  let(:host) { "127.0.0.1" }
+  let(:queue) { [] }
 
-  describe "Connnection" do
-    context "when the server is running" do
-      before do
-        expect(socket).to receive(:sysread).at_least(:once).with(Lumberjack::Connection::READ_SIZE).and_return("")
-        allow(socket).to receive(:syswrite).with(anything).and_return(true)
-        allow(socket).to receive(:close)
+  before do
+    expect(File).to receive(:read).at_least(1).with(certificate_file_crt) { certificate.first.to_s }
+    expect(File).to receive(:read).at_least(1).with(certificate_file_key) { certificate.last.to_s }
+  end
 
-        expectation = receive(:feed)
-          .with("")
-          .and_yield(:window_size, random_number_of_events)
+  subject do
+    Lumberjack::Server.new(:port => port,
+                           :address => host,
+                           :ssl_certificate => certificate_file_crt,
+                           :ssl_key => certificate_file_key)
+  end
 
-        random_number_of_events.times { |n| expectation.and_yield(:data, start_sequence + n + 1, payload) }
-
-        expect_any_instance_of(Lumberjack::Parser).to expectation
-      end
-
-      it "should ack the end of a sequence" do
-        expect(socket).to receive(:syswrite).with(["1A", random_number_of_events + start_sequence].pack("A*N"))
-        connection.read_socket
+  it "should not block when closing the server" do
+    thread = Thread.new do
+      subject.run do |event|
+        queue << event
       end
     end
 
-    context "when the server stop" do
-      let(:server) { double("server", :closed? => true) }
-      before do
-        expect(socket).to receive(:close).and_return(true)
-      end
-
-      it "stop reading from the socket" do
-        expect { |b| connection.run(&b) }.not_to yield_control
-      end
-    end
+    sleep(1) while thread.status != "run"
+    subject.close
+    wait_for { thread.status }.to be_falsey
   end
 end
