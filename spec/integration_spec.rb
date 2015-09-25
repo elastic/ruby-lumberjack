@@ -78,6 +78,13 @@ describe "A client" do
       end
       batch
     end
+    let(:client) do
+      Lumberjack::Client.new({
+        :host => host,
+        :addresses => host,
+        :ssl_certificate => certificate_file_crt
+      }.merge(config))
+    end
 
     context "when sequence start at 0" do
       let(:sequence_start) { 0 }
@@ -136,11 +143,15 @@ describe "A client" do
     end
 
     context "When transmitting a payload" do
-      let(:client) do
-        Lumberjack::Client.new(:port => tcp_port, :host => host, :addresses => host, :ssl => false)
-      end
+      let(:config) { { :port => tcp_port, :ssl => false } }
       include_examples "transmit payloads"
     end
+
+    context "When transmitting a json payload" do
+      let(:config) { { :port => tcp_port, :ssl => false, :json => true } }
+      include_examples "transmit payloads"
+    end
+
   end
 
   context "using ssl encrypted connection" do
@@ -184,12 +195,12 @@ describe "A client" do
     end
 
     context "When transmitting a payload" do
-      let(:client) do
-        Lumberjack::Client.new(:port => port,
-                               :host => host,
-                               :addresses => host,
-                               :ssl_certificate => certificate_file_crt)
-      end
+      let(:config) { { :port => port, :ssl => true } }
+      include_examples "transmit payloads"
+    end
+
+    context "When transmitting a json payload" do
+      let(:config) { { :port => port, :ssl => true, :json => true } }
       include_examples "transmit payloads"
     end
   end
