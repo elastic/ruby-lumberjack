@@ -4,7 +4,6 @@ require "socket"
 require "thread"
 require "openssl"
 require "zlib"
-require "json"
 
 module Lumberjack
   class Server
@@ -179,6 +178,7 @@ module Lumberjack
     def json_data_payload(&block)
       payload = get
       yield :json, @sequence, Lumberjack::json.load(payload)
+      transition(:header, 2)
     end
 
     def data_lead(&block)
@@ -260,14 +260,14 @@ module Lumberjack
       # X:   - on timeout, ack all.
       # X: Doing so will prevent slow streams from retransmitting
       # X: too many events after errors.
-      @parser.feed(@fd.sysread(READ_SIZE)) do |event, *args|
-        case event
+      @parser.feed(@fd.sysread(READ_SIZE)) do |code, *args|
+        case code
         when :window_size
           # We receive a new payload
           window_size(*args)
           reset_next_ack
         when :data, :json
-          data(event, *args, &block)
+          data(code, *args, &block)
         end
       end
     end
