@@ -4,9 +4,12 @@ require "socket"
 require "thread"
 require "openssl"
 require "zlib"
+require "concurrent"
 
 module Lumberjack
   class Server
+    SOCKET_TIMEOUT = 1
+
     attr_reader :port
 
     # Create a new Lumberjack server.
@@ -36,50 +39,126 @@ module Lumberjack
         end
       end
 
-      tcp_server = TCPServer.new(@options[:address], @options[:port])
+      @server = TCPServer.new(@options[:address], @options[:port])
+
+      @close = Concurrent::AtomicBoolean.new
 
       # Query the port in case the port number is '0'
       # TCPServer#addr == [ address_family, port, address, address ]
-      @port = tcp_server.addr[1]
+      @port = @server.addr[1]
 
-      if !@options[:ssl]
-        @server = tcp_server
-      else
+      if @options[:ssl]
         # load SSL certificate
-        ssl = OpenSSL::SSL::SSLContext.new
-        ssl.cert = OpenSSL::X509::Certificate.new(File.read(@options[:ssl_certificate]))
-        ssl.key = OpenSSL::PKey::RSA.new(File.read(@options[:ssl_key]),
+        @ssl = OpenSSL::SSL::SSLContext.new
+        @ssl.timeout = SOCKET_TIMEOUT
+        @ssl.cert = OpenSSL::X509::Certificate.new(File.read(@options[:ssl_certificate]))
+        @ssl.key = OpenSSL::PKey::RSA.new(File.read(@options[:ssl_key]),
           @options[:ssl_key_passphrase])
-
-        @server = OpenSSL::SSL::SSLServer.new(tcp_server, ssl)
       end
-
     end # def initialize
 
     def run(&block)
-      while true
+      while !closed?
         connection = accept
-        Thread.new(connection) do |connection|
-          connection.run(&block)
+
+        # TODO(ph) implement a thread pool
+        # and revise the close logic
+        if connection
+          Thread.new(connection) do |connection|
+            connection.run(&block)
+          end
         end
       end
     end # def run
 
+    def ssl?
+      @ssl
+    end
+
     def accept(&block)
-      begin
-        fd = @server.accept
-      rescue EOFError, OpenSSL::SSL::SSLError, IOError
-        # ssl handshake or other accept-related failure.
-        # TODO(sissel): Make it possible to log this.
-        retry
-      end
+      socket = accept_tcp
+      return if socket.nil?
+
       if block_given?
-        block.call(fd)
+        # we only return the socket so
+        # we complete the ssl handshake
+        socket = accept_ssl(socket) if ssl?
+        block.call(socket)
       else
-        Connection.new(fd)
+        # Do the SSL handshake later
+        # on first sysread
+        socket = SocketLazySSLHandshake.new(socket, self) if ssl?
+        Connection.new(socket, self)
       end
     end
+
+    def accept_tcp
+      begin
+       socket = @server.accept_nonblock
+      rescue  IOError, EOFError, SocketError # Ressource not ready yet, so lets try again
+        socket.close rescue nil?
+        retry unless closed?
+      rescue IO::WaitReadable, Errno::EAGAIN
+        begin
+          IO.select([@server], nil, nil, SOCKET_TIMEOUT)
+          retry unless closed?
+        rescue IOError => e # we currently closing and the socket is marked as closing
+          raise e unless closed?
+        end
+      rescue Errno::EBADF # Socket is already close.
+      end
+    end
+
+    def accept_ssl(tcp_socket)
+      ssl_socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, @ssl)
+      ssl_socket.sync_close
+
+      begin
+        ssl_socket.accept_nonblock
+        return ssl_socket
+      rescue IO::WaitReadable #handshake
+        IO.select([ssl_socket], nil, nil, SOCKET_TIMEOUT)
+        retry unless closed?
+      rescue IO::WaitWritable # handshake
+        IO.select(nil, [ssl_socket], nil, SOCKET_TIMEOUT)
+        retry unless closed?
+      end
+    end
+
+    def closed?
+      @close.value
+    end
+
+    def close
+      @close.make_true
+      @server.close unless @server.closed?
+    end
   end # class Server
+
+  # Wait until we read from the socket to do the actual
+  # handshake, this allow the handshake to be done in the caller thread 
+  # and not blocking the main acceptor thread.
+  #
+  # Doing so, should not interfere in the error handling since in all scenarios we
+  # just bail out and close the socket.
+  #
+  # Using this decorator allow us to keep the same api for the library
+  # -- ph
+  class SocketLazySSLHandshake < SimpleDelegator
+    def initialize(socket, server)
+      super(socket)
+      @server = server
+    end
+
+    def sysread(*args)
+      unless @handshaked
+        socket = @server.accept_ssl(__getobj__)
+        __setobj__(socket)
+        @handshaked = true
+      end
+      __getobj__.sysread(*args)
+    end
+  end
 
   class Parser
     def initialize
@@ -201,7 +280,6 @@ module Lumberjack
         yield :data, @sequence, @data
         transition(:header, 2)
       end
-
     end # def data_field_value
 
     def compressed_lead(&block)
@@ -221,17 +299,19 @@ module Lumberjack
   class Connection
     READ_SIZE = 16384
 
-    def initialize(fd)
-      super()
+    attr_accessor :server
+
+    def initialize(fd, server)
       @parser = Parser.new
       @fd = fd
 
+      @server = server
       # a safe default until we are told by the client what window size to use
       @window_size = 1 
     end
 
     def run(&block)
-      while true
+      while !server.closed?
         read_socket(&block)
       end
     rescue EOFError, OpenSSL::SSL::SSLError, IOError, Errno::ECONNRESET
@@ -260,7 +340,7 @@ module Lumberjack
     end
 
     def close
-      @fd.close
+      @fd.close unless @fd.closed?
     end
 
     def window_size(size)

@@ -21,7 +21,6 @@ module Lumberjack
       raise "Must set a ssl certificate or path" if @opts[:ssl_certificate].nil? && @opts[:ssl]
 
       @socket = connect
-
     end
 
     private
