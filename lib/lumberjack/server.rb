@@ -63,8 +63,10 @@ module Lumberjack
 
         # TODO(ph) implement a thread pool
         # and revise the close logic
-        Thread.new(connection) do |connection|
-          connection.run(&block)
+        if connection
+          Thread.new(connection) do |connection|
+            connection.run(&block)
+          end
         end
       end
     end # def run
@@ -75,6 +77,7 @@ module Lumberjack
 
     def accept(&block)
       socket = accept_tcp
+      return if socket.nil?
 
       if block_given?
         # we only return the socket so
