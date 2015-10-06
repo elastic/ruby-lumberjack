@@ -25,7 +25,8 @@ module Lumberjack
         :ssl => true,
         :ssl_certificate => nil,
         :ssl_key => nil,
-        :ssl_key_passphrase => nil
+        :ssl_key_passphrase => nil,
+        :ssl_cert_chain => nil
       }.merge(options)
 
       if @options[:ssl]
@@ -41,7 +42,6 @@ module Lumberjack
       # Query the port in case the port number is '0'
       # TCPServer#addr == [ address_family, port, address, address ]
       @port = tcp_server.addr[1]
-
       if !@options[:ssl]
         @server = tcp_server
       else
@@ -51,10 +51,47 @@ module Lumberjack
         ssl.key = OpenSSL::PKey::RSA.new(File.read(@options[:ssl_key]),
           @options[:ssl_key_passphrase])
 
+        if @options[:ssl_cert_chain] != nil
+          ssl.extra_chain_cert = cert_chain(File.read(@options[:ssl_cert_chain]))
+        end
+
         @server = OpenSSL::SSL::SSLServer.new(tcp_server, ssl)
       end
-
     end # def initialize
+
+
+    ## Borrowed from packettheif/uti.rb:
+    ## https://github.com/iSECPartners/tlspretense/blob/master/lib/packetthief/util.rb
+    # Extracts all PEM encoded certs from a raw string and returns a list of
+    # X509 certificate objects in the order they appear in the file.
+    #
+    # This can be helpful for loading a chain of certificates, eg for a
+    # server.
+    #
+    # Usage:
+    #
+    #   chain = cert_chain(File.read("chain.pem"))
+    #   p chain # => [#<OpenSSL::X509::Certificate subject=/C=US/CN=my.hostname.com, issuer=/C=US/CN=Trusted CA...>,
+    #                   #<OpenSSL::X509::Certificate subject=/C=US/CN=Trusted CA ... >]
+    def cert_chain(raw)
+      rawchain = split_chain(raw)
+      rawchain.map { |rawcert| OpenSSL::X509::Certificate.new(rawcert) }
+    end
+
+    ## Continuing borrowing from packetthief/util.rb
+    ## https://github.com/iSECPartners/tlspretense/blob/master/lib/packetthief/util.rb
+    # Extracts all PEM encoded certificates out of a raw string and returns
+    # each raw PEM encoded certificate in an array.
+    def split_chain(raw)
+      chain = []
+      remaining = raw
+      certpat = /-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----/m
+      while m = certpat.match(remaining)
+        remaining = m.post_match
+        chain << m[0].strip
+      end
+      chain
+    end
 
     def run(&block)
       while true
@@ -99,17 +136,17 @@ module Lumberjack
     end # def transition
 
     # Feed data to this parser.
-    # 
+    #
     # Currently, it will return the raw payload of websocket messages.
     # Otherwise, it returns nil if no complete message has yet been consumed.
     #
-    # @param [String] the string data to feed into the parser. 
+    # @param [String] the string data to feed into the parser.
     # @return [String, nil] the websocket message payload, if any, nil otherwise.
     def feed(data, &block)
       @buffer << data
       #p :need => @need
       while have?(@need)
-        send(@state, &block) 
+        send(@state, &block)
         #case @state
         #when :header; header(&block)
         #when :window_size; window_size(&block)
@@ -227,7 +264,7 @@ module Lumberjack
       @fd = fd
 
       # a safe default until we are told by the client what window size to use
-      @window_size = 1 
+      @window_size = 1
     end
 
     def run(&block)
@@ -275,13 +312,13 @@ module Lumberjack
       block.call(map) if block_given?
       ack_if_needed(sequence)
     end
-    
+
     def compute_next_ack(sequence)
       (sequence + @window_size - 1) % SEQUENCE_MAX
     end
 
     def ack_if_needed(sequence)
-      # The first encoded event will contain the sequence number 
+      # The first encoded event will contain the sequence number
       # this is needed to know when we should ack.
       @next_ack = compute_next_ack(sequence) if @next_ack.nil?
       @fd.syswrite(["1A", sequence].pack("A*N")) if sequence == @next_ack
