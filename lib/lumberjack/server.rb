@@ -1,4 +1,5 @@
 # encoding: utf-8
+require "lumberjack"
 require "socket"
 require "thread"
 require "openssl"
@@ -21,31 +22,41 @@ module Lumberjack
       @options = {
         :port => 0,
         :address => "0.0.0.0",
+        :ssl => true,
         :ssl_certificate => nil,
         :ssl_key => nil,
         :ssl_key_passphrase => nil,
         :ssl_cert_chain => nil
       }.merge(options)
 
-      [:ssl_certificate, :ssl_key].each do |k|
-        if @options[k].nil?
-          raise "You must specify #{k} in Lumberjack::Server.new(...)"
+      if @options[:ssl]
+        [:ssl_certificate, :ssl_key].each do |k|
+          if @options[k].nil?
+            raise "You must specify #{k} in Lumberjack::Server.new(...)"
+          end
         end
       end
 
-      @tcp_server = TCPServer.new(@options[:address], @options[:port])
+      tcp_server = TCPServer.new(@options[:address], @options[:port])
 
       # Query the port in case the port number is '0'
       # TCPServer#addr == [ address_family, port, address, address ]
-      @port = @tcp_server.addr[1]
-      @ssl = OpenSSL::SSL::SSLContext.new
-      @ssl.cert = OpenSSL::X509::Certificate.new(File.read(@options[:ssl_certificate]))
-      @ssl.key = OpenSSL::PKey::RSA.new(File.read(@options[:ssl_key]),
-                                        @options[:ssl_key_passphrase])
-      if @options[:ssl_cert_chain] != nil
-        @ssl.extra_chain_cert = cert_chain(File.read(@options[:ssl_cert_chain]))
+      @port = tcp_server.addr[1]
+      if !@options[:ssl]
+        @server = tcp_server
+      else
+        # load SSL certificate
+        ssl = OpenSSL::SSL::SSLContext.new
+        ssl.cert = OpenSSL::X509::Certificate.new(File.read(@options[:ssl_certificate]))
+        ssl.key = OpenSSL::PKey::RSA.new(File.read(@options[:ssl_key]),
+          @options[:ssl_key_passphrase])
+
+        if @options[:ssl_cert_chain] != nil
+          ssl.extra_chain_cert = cert_chain(File.read(@options[:ssl_cert_chain]))
+        end
+
+        @server = OpenSSL::SSL::SSLServer.new(tcp_server, ssl)
       end
-      @ssl_server = OpenSSL::SSL::SSLServer.new(@tcp_server, @ssl)
     end # def initialize
 
 
@@ -67,7 +78,7 @@ module Lumberjack
       rawchain.map { |rawcert| OpenSSL::X509::Certificate.new(rawcert) }
     end
 
-    ## Continuing borrowing from packetthief/util.rb 
+    ## Continuing borrowing from packetthief/util.rb
     ## https://github.com/iSECPartners/tlspretense/blob/master/lib/packetthief/util.rb
     # Extracts all PEM encoded certificates out of a raw string and returns
     # each raw PEM encoded certificate in an array.
@@ -93,7 +104,7 @@ module Lumberjack
 
     def accept(&block)
       begin
-        fd = @ssl_server.accept
+        fd = @server.accept
       rescue EOFError, OpenSSL::SSL::SSLError, IOError
         # ssl handshake or other accept-related failure.
         # TODO(sissel): Make it possible to log this.
@@ -125,17 +136,17 @@ module Lumberjack
     end # def transition
 
     # Feed data to this parser.
-    # 
+    #
     # Currently, it will return the raw payload of websocket messages.
     # Otherwise, it returns nil if no complete message has yet been consumed.
     #
-    # @param [String] the string data to feed into the parser. 
+    # @param [String] the string data to feed into the parser.
     # @return [String, nil] the websocket message payload, if any, nil otherwise.
     def feed(data, &block)
       @buffer << data
       #p :need => @need
       while have?(@need)
-        send(@state, &block) 
+        send(@state, &block)
         #case @state
         #when :header; header(&block)
         #when :window_size; window_size(&block)
@@ -245,37 +256,45 @@ module Lumberjack
   end # class Parser
 
   class Connection
+    READ_SIZE = 16384
+
     def initialize(fd)
       super()
       @parser = Parser.new
       @fd = fd
-      @last_ack = 0
 
       # a safe default until we are told by the client what window size to use
-      @window_size = 1 
+      @window_size = 1
     end
 
     def run(&block)
       while true
-        # TODO(sissel): Ack on idle.
-        # X: - if any unacked, IO.select
-        # X:   - on timeout, ack all.
-        # X: Doing so will prevent slow streams from retransmitting
-        # X: too many events after errors.
-        @parser.feed(@fd.sysread(16384)) do |event, *args|
-          case event
-          when :window_size; window_size(*args, &block)
-          when :data; data(*args, &block)
-          end
-          #send(event, *args)
-        end # feed
-      end # while true
+        read_socket(&block)
+      end
     rescue EOFError, OpenSSL::SSL::SSLError, IOError, Errno::ECONNRESET
       # EOF or other read errors, only action is to shutdown which we'll do in
       # 'ensure'
     ensure
       close rescue 'Already closed stream'
     end # def run
+
+    def read_socket(&block)
+      # TODO(sissel): Ack on idle.
+      # X: - if any unacked, IO.select
+      # X:   - on timeout, ack all.
+      # X: Doing so will prevent slow streams from retransmitting
+      # X: too many events after errors.
+      @parser.feed(@fd.sysread(READ_SIZE)) do |event, *args|
+        case event
+        when :window_size
+          # We receive a new payload
+          window_size(*args)
+          reset_next_ack
+        when :data
+          data(*args, &block)
+        end
+      end
+    end
 
     def close
       @fd.close
@@ -285,13 +304,24 @@ module Lumberjack
       @window_size = size
     end
 
+    def reset_next_ack
+      @next_ack = nil
+    end
+
     def data(sequence, map, &block)
       block.call(map) if block_given?
-      if (sequence - @last_ack) >= @window_size
-        @fd.syswrite(["1A", sequence].pack("A*N"))
-        @last_ack = sequence
-      end
+      ack_if_needed(sequence)
+    end
+
+    def compute_next_ack(sequence)
+      (sequence + @window_size - 1) % SEQUENCE_MAX
+    end
+
+    def ack_if_needed(sequence)
+      # The first encoded event will contain the sequence number
+      # this is needed to know when we should ack.
+      @next_ack = compute_next_ack(sequence) if @next_ack.nil?
+      @fd.syswrite(["1A", sequence].pack("A*N")) if sequence == @next_ack
     end
   end # class Connection
-
 end # module Lumberjack

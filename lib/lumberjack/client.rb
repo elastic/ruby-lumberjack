@@ -1,26 +1,24 @@
 # encoding: utf-8
+require "lumberjack"
 require "socket"
 require "thread"
 require "openssl"
 require "zlib"
 
 module Lumberjack
-
-  SEQUENCE_MAX = (2**32-1).freeze
-
   class Client
     def initialize(opts={})
       @opts = {
         :port => 0,
         :addresses => [],
         :ssl_certificate => nil,
-        :window_size => 5000
+        :ssl => true,
       }.merge(opts)
 
       @opts[:addresses] = [@opts[:addresses]] if @opts[:addresses].class == String
       raise "Must set a port." if @opts[:port] == 0
       raise "Must set atleast one address" if @opts[:addresses].empty? == 0
-      raise "Must set a ssl certificate or path" if @opts[:ssl_certificate].nil?
+      raise "Must set a ssl certificate or path" if @opts[:ssl_certificate].nil? && @opts[:ssl]
 
       @socket = connect
 
@@ -40,8 +38,8 @@ module Lumberjack
     end
 
     public
-    def write(hash)
-      @socket.write_hash(hash)
+    def write(elements)
+      @socket.write_sync(elements)
     end
 
     public
@@ -51,16 +49,17 @@ module Lumberjack
   end
 
   class Socket
-
     # Create a new Lumberjack Socket.
     #
     # - options is a hash. Valid options are:
     #
     # * :port - the port to listen on
     # * :address - the host/address to bind to
-    # * :ssl_certificate - the path to the ssl cert to use
+    # * :ssl - enable/disable ssl support
+    # * :ssl_certificate - the path to the ssl cert to use.
+    #                      If ssl_certificate is not set, a plain tcp connection
+    #                      will be used.
     attr_reader :sequence
-    attr_reader :window_size
     attr_reader :host
     def initialize(opts={})
       @sequence = 0
@@ -69,10 +68,9 @@ module Lumberjack
         :port => 0,
         :address => "127.0.0.1",
         :ssl_certificate => nil,
-        :window_size => 5000
+        :ssl => true,
       }.merge(opts)
       @host = @opts[:address]
-      @window_size = @opts[:window_size]
 
       connection_start(opts)
     end
@@ -80,9 +78,21 @@ module Lumberjack
     private
     def connection_start(opts)
       tcp_socket = TCPSocket.new(opts[:address], opts[:port])
-      @socket = OpenSSL::SSL::SSLSocket.new(tcp_socket)
-      @socket.connect
-      @socket.syswrite(["1", "W", @window_size].pack("AAN"))
+      if !opts[:ssl]
+        @socket = tcp_socket
+      else
+        certificate = OpenSSL::X509::Certificate.new(File.read(opts[:ssl_certificate]))
+
+        certificate_store = OpenSSL::X509::Store.new
+        certificate_store.add_cert(certificate)
+
+        ssl_context = OpenSSL::SSL::SSLContext.new
+        ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+        ssl_context.cert_store = certificate_store
+
+        @socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, ssl_context)
+        @socket.connect
+      end
     end
 
     private 
@@ -92,9 +102,12 @@ module Lumberjack
     end
 
     private
-    def write(msg)
-      compress = Zlib::Deflate.deflate(msg)
-      payload = ["1","C",compress.length,compress].pack("AANA#{compress.length}")
+    def send_window_size(size)
+      @socket.syswrite(["1", "W", size].pack("AAN"))
+    end
+
+    private
+    def send_payload(payload)
       # SSLSocket has a limit of 16k per message
       # execute multiple writes if needed
       bytes_written = 0
@@ -104,18 +117,28 @@ module Lumberjack
     end
 
     public
-    def write_hash(hash)
-      frame = Encoder.to_compressed_frame(hash, inc)
-      ack if unacked_sequence_size >= @window_size
-      write frame
+    def write_sync(elements)
+      elements = [elements] if elements.is_a?(Hash)
+      send_window_size(elements.size)
+
+      payload = elements.map { |element| Encoder.to_frame(element, inc) }.join
+      compress = compress_payload(payload)
+      send_payload(compress)
+
+      ack(elements.size)
+    end
+
+    private 
+    def compress_payload(payload)
+      compress = Zlib::Deflate.deflate(payload)
+      ["1", "C", compress.bytesize, compress].pack("AANA*")
     end
 
     private
-    def ack
+    def ack(size)
       _, type = read_version_and_type
       raise "Whoa we shouldn't get this frame: #{type}" if type != "A"
       @last_ack = read_last_ack
-      ack if unacked_sequence_size >= @window_size
     end
 
     private
@@ -129,6 +152,7 @@ module Lumberjack
       type    = @socket.read(1)
       [version, type]
     end
+
     private
     def read_last_ack
       @socket.read(4).unpack("N").first
@@ -136,11 +160,6 @@ module Lumberjack
   end
 
   module Encoder
-    def self.to_compressed_frame(hash, sequence)
-      compress = Zlib::Deflate.deflate(to_frame(hash, sequence))
-      ["1", "C", compress.bytesize, compress].pack("AANA#{compress.length}")
-    end
-
     def self.to_frame(hash, sequence)
       frame = ["1", "D", sequence]
       pack = "AAN"
