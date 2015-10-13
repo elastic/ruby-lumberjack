@@ -13,6 +13,7 @@ module Lumberjack
         :addresses => [],
         :ssl_certificate => nil,
         :ssl => true,
+        :json => false,
       }.merge(opts)
 
       @opts[:addresses] = [@opts[:addresses]] if @opts[:addresses].class == String
@@ -21,7 +22,6 @@ module Lumberjack
       raise "Must set a ssl certificate or path" if @opts[:ssl_certificate].nil? && @opts[:ssl]
 
       @socket = connect
-
     end
 
     private
@@ -38,8 +38,8 @@ module Lumberjack
     end
 
     public
-    def write(elements)
-      @socket.write_sync(elements)
+    def write(elements, opts={})
+      @socket.write_sync(elements, opts)
     end
 
     public
@@ -69,6 +69,7 @@ module Lumberjack
         :address => "127.0.0.1",
         :ssl_certificate => nil,
         :ssl => true,
+        :json => false,
       }.merge(opts)
       @host = @opts[:address]
 
@@ -117,11 +118,16 @@ module Lumberjack
     end
 
     public
-    def write_sync(elements)
+    def write_sync(elements, opts={})
+      options = {
+        :json => @opts[:json],
+      }.merge(opts)
+
       elements = [elements] if elements.is_a?(Hash)
       send_window_size(elements.size)
 
-      payload = elements.map { |element| Encoder.to_frame(element, inc) }.join
+      encoder = options[:json] ? JsonEncoder : FrameEncoder
+      payload = elements.map { |element| encoder.to_frame(element, inc) }.join
       compress = compress_payload(payload)
       send_payload(compress)
 
@@ -159,7 +165,17 @@ module Lumberjack
     end
   end
 
-  module Encoder
+  module JsonEncoder
+    def self.to_frame(hash, sequence)
+      json = Lumberjack::json.dump(hash)
+      json_length = json.bytesize
+      pack = "AANNA#{json_length}"
+      frame = ["1", "J", sequence, json_length, json]
+      frame.pack(pack)
+    end
+  end # JsonEncoder
+
+  module FrameEncoder
     def self.to_frame(hash, sequence)
       frame = ["1", "D", sequence]
       pack = "AAN"

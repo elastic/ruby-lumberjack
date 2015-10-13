@@ -32,7 +32,7 @@ describe "A client" do
         tcp_server.accept do |socket|
           con = Lumberjack::Connection.new(socket, tcp_server)
           begin
-            con.run { |data| queue << data }
+            con.run { |_, data| queue << data }
           rescue
             # Close connection on failure. For example SSL client will make
             # parser for TCP based server trip.
@@ -43,7 +43,7 @@ describe "A client" do
     end
 
     @ssl_server = Thread.new do
-      ssl_server.run { |data| queue << data }
+      ssl_server.run { |_, data| queue << data }
     end
   end
 
@@ -75,6 +75,13 @@ describe "A client" do
         batch <<  { "line" => "foobar #{n}" }
       end
       batch
+    end
+    let(:client) do
+      Lumberjack::Client.new({
+        :host => host,
+        :addresses => host,
+        :ssl_certificate => certificate_file_crt
+      }.merge(config))
     end
 
     context "when sequence start at 0" do
@@ -134,11 +141,15 @@ describe "A client" do
     end
 
     context "When transmitting a payload" do
-      let(:client) do
-        Lumberjack::Client.new(:port => tcp_port, :host => host, :addresses => host, :ssl => false)
-      end
+      let(:config) { { :port => tcp_port, :ssl => false } }
       include_examples "transmit payloads"
     end
+
+    context "When transmitting a json payload" do
+      let(:config) { { :port => tcp_port, :ssl => false, :json => true } }
+      include_examples "transmit payloads"
+    end
+
   end
 
   context "using ssl encrypted connection" do
@@ -182,12 +193,12 @@ describe "A client" do
     end
 
     context "When transmitting a payload" do
-      let(:client) do
-        Lumberjack::Client.new(:port => port,
-                               :host => host,
-                               :addresses => host,
-                               :ssl_certificate => certificate_file_crt)
-      end
+      let(:config) { { :port => port, :ssl => true } }
+      include_examples "transmit payloads"
+    end
+
+    context "When transmitting a json payload" do
+      let(:config) { { :port => port, :ssl => true, :json => true } }
       include_examples "transmit payloads"
     end
   end
