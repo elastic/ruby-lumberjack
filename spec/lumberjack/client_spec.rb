@@ -8,9 +8,7 @@ require "openssl"
 require "zlib"
 
 describe "Lumberjack::Client" do
-
   describe "Lumberjack::Socket" do
-
     let(:port)   { 5000 }
 
     subject(:socket) { Lumberjack::Socket.new(:port => port, :ssl_certificate => "" ) }
@@ -65,10 +63,6 @@ describe "Lumberjack::Client" do
   end
 
   describe Lumberjack::JsonEncoder do
-    def with_header(frame, version = 1)
-      [version.to_s, "W", 1].pack("AAN") + frame
-    end
-
     it 'should create frames from nested hash' do
       content = {
         "number" => 1,
