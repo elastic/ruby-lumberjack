@@ -50,9 +50,31 @@ module Lumberjack
 
       if @options[:ssl]
         # load SSL certificate
-        @ssl = OpenSSL::SSL::SSLContext.new
-        @ssl.cert = OpenSSL::X509::Certificate.new(File.read(@options[:ssl_certificate]))
-        @ssl.key = OpenSSL::PKey::RSA.new(File.read(@options[:ssl_key]),
+        ssl = OpenSSL::SSL::SSLContext.new
+        raw_cert = File.read(@options[:ssl_certificate])
+        ssl.cert = OpenSSL::X509::Certificate.new(raw_cert)
+        
+        # Parse chain certificates from @ssl_cert
+        certPosition = [0]
+        while certPosition[-1]
+          certPosition.push(raw_cert.index("-----B", certPosition[-1] + 1))
+        end
+
+        # Gather chain from certificate
+        if certPosition.length > 2
+          ssl.extra_chain_cert = Array.new
+          for i in 1..(certPosition.length - 2)
+            if certPosition[i+1]
+              certEnd = certPosition[i+1] - 1
+            else
+              certEnd = raw_cert.length - 1
+            end
+            certLink = OpenSSL::X509::Certificate.new(raw_cert[certPosition[i]..certEnd])
+            ssl.extra_chain_cert.push(certLink)
+          end
+        end
+        
+        ssl.key = OpenSSL::PKey::RSA.new(File.read(@options[:ssl_key]),
           @options[:ssl_key_passphrase])
       end
     end # def initialize
