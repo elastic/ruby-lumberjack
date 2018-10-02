@@ -12,6 +12,7 @@ module Lumberjack
         :port => 0,
         :addresses => [],
         :ssl_certificate => nil,
+        :ssl_ca_file => nil,
         :ssl => true,
         :json => false,
       }.merge(opts)
@@ -59,6 +60,7 @@ module Lumberjack
     # * :ssl_certificate - the path to the ssl cert to use.
     #                      If ssl_certificate is not set, a plain tcp connection
     #                      will be used.
+    #* :ssl_ca_file - The path to a file containing a PEM-format CA certificate
     attr_reader :sequence
     attr_reader :host
     def initialize(opts={})
@@ -68,6 +70,7 @@ module Lumberjack
         :port => 0,
         :address => "127.0.0.1",
         :ssl_certificate => nil,
+        :ssl_ca_file => nil,
         :ssl => true,
         :json => false,
       }.merge(opts)
@@ -89,6 +92,9 @@ module Lumberjack
 
         ssl_context = OpenSSL::SSL::SSLContext.new
         ssl_context.verify_mode = OpenSSL::SSL::VERIFY_PEER
+        if opts[:ssl_ca_file]
+          ssl_context.ca_file = opts[:ssl_ca_file]
+        end
         ssl_context.cert_store = certificate_store
 
         @socket = OpenSSL::SSL::SSLSocket.new(tcp_socket, ssl_context)
